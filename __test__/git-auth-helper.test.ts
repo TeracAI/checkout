@@ -1179,6 +1179,8 @@ async function setup(testName: string): Promise<void> {
     sparseCheckoutConeMode: true,
     fetchDepth: 1,
     fetchTags: false,
+    fetchTimeout: 0,
+    fetchRetries: 0,
     showProgress: true,
     lfs: false,
     submodules: false,

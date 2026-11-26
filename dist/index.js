@@ -35507,8 +35507,8 @@ class retry_helper_RetryHelper {
         return new Promise(resolve => setTimeout(resolve, seconds * 1000));
     }
 }
-async function execute(action) {
-    const retryHelper = new retry_helper_RetryHelper();
+async function execute(action, maxAttempts) {
+    const retryHelper = new retry_helper_RetryHelper(maxAttempts);
     return await retryHelper.execute(action);
 }
 
@@ -35764,8 +35764,8 @@ class GitCommandManager {
         }
         const that = this;
         await execute(async () => {
-            await that.execGit(args);
-        });
+            await that.execGit(args, false, false, {}, options.timeout);
+        }, options.retries);
     }
     async getDefaultBranch(repositoryUrl) {
         let output;
@@ -35980,7 +35980,7 @@ class GitCommandManager {
         await result.initializeCommandManager(workingDirectory, lfs, doSparseCheckout);
         return result;
     }
-    async execGit(args, allowAllExitCodes = false, silent = false, customListeners = {}) {
+    async execGit(args, allowAllExitCodes = false, silent = false, customListeners = {}, timeoutSeconds = 0) {
         directoryExistsSync(this.workingDirectory, true);
         const result = new GitOutput();
         const env = {};
@@ -36004,7 +36004,23 @@ class GitCommandManager {
             ignoreReturnCode: allowAllExitCodes,
             listeners: mergedListeners
         };
-        result.exitCode = await exec_exec(`"${this.gitPath}"`, args, options);
+        // Bound the git invocation with the coreutils `timeout` utility when a
+        // per-attempt timeout is requested. This kills a git process that hangs
+        // (e.g. a stalled `fetch` during "fetch repository") so the surrounding
+        // retryHelper can retry on a fresh attempt instead of stalling for hours.
+        // `timeout` is only reliably present on Linux runners; on other platforms
+        // we fall back to running git directly (no timeout).
+        if (timeoutSeconds > 0 && process.platform === 'linux') {
+            result.exitCode = await exec_exec('timeout', ['--kill-after=10', `${timeoutSeconds}`, this.gitPath, ...args], options);
+            // 124 (TERM) / 137 (SIGKILL) signal a timeout kill from `timeout`.
+            if (!allowAllExitCodes &&
+                (result.exitCode === 124 || result.exitCode === 137)) {
+                throw new Error(`The command timed out after ${timeoutSeconds} seconds: git ${args.join(' ')}`);
+            }
+        }
+        else {
+            result.exitCode = await exec_exec(`"${this.gitPath}"`, args, options);
+        }
         result.stdout = stdout.join('');
         core_debug(result.exitCode.toString());
         core_debug(result.stdout);
@@ -41807,6 +41823,12 @@ async function getSource(settings) {
         // Fetch
         startGroup('Fetching the repository');
         const fetchOptions = {};
+        if (settings.fetchTimeout > 0) {
+            fetchOptions.timeout = settings.fetchTimeout;
+        }
+        if (settings.fetchRetries > 0) {
+            fetchOptions.retries = settings.fetchRetries;
+        }
         if (settings.filter) {
             fetchOptions.filter = settings.filter;
         }
@@ -42158,6 +42180,18 @@ async function getInputs() {
         result.fetchDepth = 0;
     }
     core_debug(`fetch depth = ${result.fetchDepth}`);
+    // Fetch timeout (per-attempt, seconds). 0 disables.
+    result.fetchTimeout = Math.floor(Number(getInput('fetch-timeout') || '0'));
+    if (isNaN(result.fetchTimeout) || result.fetchTimeout < 0) {
+        result.fetchTimeout = 0;
+    }
+    core_debug(`fetch timeout = ${result.fetchTimeout}`);
+    // Fetch retries (max attempts). 0 falls back to the built-in default.
+    result.fetchRetries = Math.floor(Number(getInput('fetch-retries') || '0'));
+    if (isNaN(result.fetchRetries) || result.fetchRetries < 0) {
+        result.fetchRetries = 0;
+    }
+    core_debug(`fetch retries = ${result.fetchRetries}`);
     // Fetch tags
     result.fetchTags =
         (getInput('fetch-tags') || 'false').toUpperCase() === 'TRUE';
