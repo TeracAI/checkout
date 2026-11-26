@@ -50,6 +50,20 @@ export interface IGitSourceSettings {
   fetchDepth: number
 
   /**
+   * Per-attempt timeout (in seconds) for the git fetch. 0 disables the
+   * timeout. When set, a fetch that hangs is killed after this many seconds
+   * and retried (Linux runners only).
+   */
+  fetchTimeout: number
+
+  /**
+   * Maximum number of git fetch attempts (including the first). Defaults to 3
+   * when unset. Combined with fetchTimeout, a hung attempt is killed and
+   * retried up to this many times.
+   */
+  fetchRetries: number
+
+  /**
    * Fetch tags, even if fetchDepth > 0 (default: false)
    */
   fetchTags: boolean
@@ -118,4 +132,10 @@ export interface IGitSourceSettings {
    * User override on the GitHub Server/Host URL that hosts the repository to be cloned
    */
   githubServerUrl: string | undefined
+
+  /**
+   * Opt-in to allow checking out fork pull request code from a workflow
+   * triggered by pull_request_target or workflow_run.
+   */
+  allowUnsafePrCheckout: boolean
 }

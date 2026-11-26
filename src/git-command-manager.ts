@@ -1,13 +1,13 @@
 import * as core from '@actions/core'
 import * as exec from '@actions/exec'
 import * as fs from 'fs'
-import * as fshelper from './fs-helper'
+import * as fshelper from './fs-helper.js'
 import * as io from '@actions/io'
 import * as path from 'path'
-import * as refHelper from './ref-helper'
-import * as regexpHelper from './regexp-helper'
-import * as retryHelper from './retry-helper'
-import {GitVersion} from './git-version'
+import * as refHelper from './ref-helper.js'
+import * as regexpHelper from './regexp-helper.js'
+import * as retryHelper from './retry-helper.js'
+import {GitVersion} from './git-version.js'
 
 // Auth header not supported before 2.9
 // Wire protocol v2 not supported before 2.18
@@ -38,12 +38,14 @@ export interface IGitCommandManager {
       filter?: string
       fetchDepth?: number
       showProgress?: boolean
+      timeout?: number
+      retries?: number
     }
   ): Promise<void>
   getDefaultBranch(repositoryUrl: string): Promise<string>
   getSubmoduleConfigPaths(recursive: boolean): Promise<string[]>
   getWorkingDirectory(): string
-  init(): Promise<void>
+  init(objectFormat?: string): Promise<void>
   isDetached(): Promise<boolean>
   lfsFetch(ref: string): Promise<void>
   lfsInstall(): Promise<void>
@@ -280,6 +282,8 @@ class GitCommandManager {
       filter?: string
       fetchDepth?: number
       showProgress?: boolean
+      timeout?: number
+      retries?: number
     }
   ): Promise<void> {
     const args = ['-c', 'protocol.version=2', 'fetch']
@@ -313,8 +317,8 @@ class GitCommandManager {
 
     const that = this
     await retryHelper.execute(async () => {
-      await that.execGit(args)
-    })
+      await that.execGit(args, false, false, {}, options.timeout)
+    }, options.retries)
   }
 
   async getDefaultBranch(repositoryUrl: string): Promise<string> {
@@ -364,8 +368,14 @@ class GitCommandManager {
     return this.workingDirectory
   }
 
-  async init(): Promise<void> {
-    await this.execGit(['init', this.workingDirectory])
+  async init(objectFormat?: string): Promise<void> {
+    const args = ['init']
+    if (objectFormat === 'sha256') {
+      args.push('--object-format=sha256')
+    }
+    args.push(this.workingDirectory)
+
+    await this.execGit(args)
   }
 
   async isDetached(): Promise<boolean> {
@@ -504,7 +514,7 @@ class GitCommandManager {
     } else {
       args.push(globalConfig ? '--global' : '--local')
     }
-    args.push('--unset', configKey, configValue)
+    args.push('--unset', configKey, regexpHelper.escape(configValue))
 
     const output = await this.execGit(args, true)
     return output.exitCode === 0
@@ -613,7 +623,8 @@ class GitCommandManager {
     args: string[],
     allowAllExitCodes = false,
     silent = false,
-    customListeners = {}
+    customListeners = {},
+    timeoutSeconds = 0
   ): Promise<GitOutput> {
     fshelper.directoryExistsSync(this.workingDirectory, true)
 
@@ -644,7 +655,32 @@ class GitCommandManager {
       listeners: mergedListeners
     }
 
-    result.exitCode = await exec.exec(`"${this.gitPath}"`, args, options)
+    // Bound the git invocation with the coreutils `timeout` utility when a
+    // per-attempt timeout is requested. This kills a git process that hangs
+    // (e.g. a stalled `fetch` during "fetch repository") so the surrounding
+    // retryHelper can retry on a fresh attempt instead of stalling for hours.
+    // `timeout` is only reliably present on Linux runners; on other platforms
+    // we fall back to running git directly (no timeout).
+    if (timeoutSeconds > 0 && process.platform === 'linux') {
+      result.exitCode = await exec.exec(
+        'timeout',
+        ['--kill-after=10', `${timeoutSeconds}`, this.gitPath, ...args],
+        options
+      )
+      // 124 (TERM) / 137 (SIGKILL) signal a timeout kill from `timeout`.
+      if (
+        !allowAllExitCodes &&
+        (result.exitCode === 124 || result.exitCode === 137)
+      ) {
+        throw new Error(
+          `The command timed out after ${timeoutSeconds} seconds: git ${args.join(
+            ' '
+          )}`
+        )
+      }
+    } else {
+      result.exitCode = await exec.exec(`"${this.gitPath}"`, args, options)
+    }
     result.stdout = stdout.join('')
 
     core.debug(result.exitCode.toString())
